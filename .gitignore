@@ -7,3 +7,4 @@ client/dist/
 !.env.example
 server/data/
 npm-debug.log*
+.neon

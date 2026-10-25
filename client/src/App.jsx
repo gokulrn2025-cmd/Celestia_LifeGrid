@@ -8,7 +8,6 @@ import {
   Lock,
   Receipt,
   CreditCard,
-  Settings as SettingsIcon,
   Plus,
   ArrowUpRight,
   Sparkles,
@@ -19,6 +18,8 @@ import {
   ShieldCheck,
   Wifi,
   WifiOff,
+  Sun,
+  Moon,
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 
@@ -29,14 +30,16 @@ import Bills from "./Bills";
 import Subscriptions from "./Subscriptions";
 import Documents from "./Documents";
 import PasswordVault from "./PasswordVault";
-import AiAssistantModal from "./components/AiAssistantModal";
+import AiAssistantPage from "./components/AiAssistantPage";
 import AuthScreen from "./AuthScreen";
 import { useAuth } from "./context/AuthContext";
+import LifeGridMark from "./components/LifeGridMark";
+import { useAmbientInteraction } from "./hooks/useAmbientInteraction";
 
 function App() {
   const { user, loading: authLoading, signOut } = useAuth();
   const [page, setPage] = useState("dashboard");
-  const [isAiModalOpen, setIsAiModalOpen] = useState(false);
+  const { backdropRef, onPointerMove, onPointerDown, onPointerLeave } = useAmbientInteraction();
 
   const {
     profile,
@@ -84,7 +87,7 @@ function App() {
         >
           <div>
             <h1>
-              {getGreeting()}, {profile.name || "Gokul"}
+              {getGreeting()}, {profile.name || "LifeGrid user"}
             </h1>
             <p>{new Intl.DateTimeFormat("en-IN", { weekday: "long", day: "numeric", month: "long" }).format(new Date())} · Your day, gathered in one place.</p>
           </div>
@@ -92,8 +95,8 @@ function App() {
           <div className="welcome-actions">
             <motion.button
               className="neo-button ai-trigger-btn"
-              onClick={() => setIsAiModalOpen(true)}
-              title="Open AI Quick-Capture Assistant"
+              onClick={() => navigate("assistant")}
+              title="Open LifeGrid AI"
               whileHover={{ y: -1 }}
               whileTap={{ scale: 0.97 }}
             >
@@ -368,8 +371,9 @@ function App() {
   }
 
   function SettingsPage() {
-    const [nameInput, setNameInput] = useState(profile.name || "Gokul");
-    const [roleInput, setRoleInput] = useState(profile.role || "Student");
+    const [nameInput, setNameInput] = useState(profile.name || "LifeGrid user");
+    const [roleInput, setRoleInput] = useState(profile.role || "Personal");
+    const [bioInput, setBioInput] = useState(profile.bio || "");
     const [savedMsg, setSavedMsg] = useState("");
     const [saveError, setSaveError] = useState("");
 
@@ -377,11 +381,23 @@ function App() {
       e.preventDefault();
       setSaveError("");
       try {
-        await updateProfile({ name: nameInput.trim(), role: roleInput.trim() });
+        await updateProfile({ name: nameInput.trim(), role: roleInput.trim(), bio: bioInput.trim() });
         setSavedMsg("Profile updated successfully.");
         setTimeout(() => setSavedMsg(""), 3000);
       } catch (err) {
         setSaveError(err.message || "Could not update your profile. Please try again.");
+      }
+    }
+
+    async function handleThemeChange() {
+      setSaveError("");
+      setSavedMsg("");
+      try {
+        await updateProfile({ theme: profile.theme === "dark" ? "light" : "dark" });
+        setSavedMsg(`Switched to ${profile.theme === "dark" ? "light" : "dark"} mode.`);
+        setTimeout(() => setSavedMsg(""), 3000);
+      } catch (err) {
+        setSaveError(err.message || "Could not update your appearance setting.");
       }
     }
 
@@ -401,10 +417,27 @@ function App() {
       <div className="module-page">
         <div className="module-header">
           <div>
-            <h2>Settings & Preferences</h2>
-            <p>Manage your account profile, data backups, and application state.</p>
+            <h2>Profile & Preferences</h2>
+            <p>Make LifeGrid yours and manage your account and data.</p>
           </div>
         </div>
+
+        <section className="profile-overview" aria-label="Account overview">
+          <div className="profile-overview-person">
+            <div className="profile-overview-avatar">{profile.avatarLetter || "L"}</div>
+            <div>
+              <span className="profile-overline">YOUR LIFEGRID PROFILE</span>
+              <h3>{profile.name || "LifeGrid user"}</h3>
+              <p>{user?.email}</p>
+            </div>
+          </div>
+          <div className="profile-overview-stats">
+            <div><strong>{tasks.length}</strong><span>Tasks</span></div>
+            <div><strong>{notes.length}</strong><span>Notes</span></div>
+            <div><strong>{bills.length}</strong><span>Bills</span></div>
+            <div><strong>{documents.length}</strong><span>Documents</span></div>
+          </div>
+        </section>
 
         <div className="settings-grid-layout">
           {/* USER PROFILE */}
@@ -420,18 +453,35 @@ function App() {
                   type="text"
                   value={nameInput}
                   onChange={(e) => setNameInput(e.target.value)}
-                  placeholder="e.g., Gokul"
+                  placeholder="Your name"
+                  required
+                  maxLength={60}
                 />
               </div>
 
               <div className="form-group">
-                <label>Role / Bio</label>
+                <label>Role or occupation</label>
                 <input
                   type="text"
                   value={roleInput}
                   onChange={(e) => setRoleInput(e.target.value)}
-                  placeholder="e.g., Student, Software Engineer"
+                  placeholder="e.g., Student, Designer, Parent"
+                  required
+                  maxLength={60}
                 />
+              </div>
+
+              <div className="form-group">
+                <label htmlFor="profile-about">A little about you</label>
+                <textarea
+                  id="profile-about"
+                  value={bioInput}
+                  onChange={(e) => setBioInput(e.target.value)}
+                  placeholder="What are you focusing on lately?"
+                  rows={3}
+                  maxLength={280}
+                />
+                <span className="profile-field-hint">{bioInput.length}/280 characters</span>
               </div>
 
               <motion.button
@@ -446,6 +496,20 @@ function App() {
               {savedMsg && <span className="settings-saved-note">{savedMsg}</span>}
               {saveError && <span className="form-error-banner" role="alert">{saveError}</span>}
             </form>
+          </div>
+
+          <div className="settings-card appearance-card">
+            <h3>{profile.theme === "dark" ? <Moon size={18} /> : <Sun size={18} />} Appearance</h3>
+            <p className="settings-desc">Choose the look that feels comfortable. Your choice follows your account across devices.</p>
+            <div className="theme-choice-row">
+              <div className="theme-choice-copy">
+                <strong>{profile.theme === "dark" ? "Dark theme" : "Light theme"}</strong>
+                <span>{profile.theme === "dark" ? "Easy on the eyes in low light." : "Bright, clear and ready for the day."}</span>
+              </div>
+              <button type="button" className="theme-toggle" role="switch" aria-checked={profile.theme === "dark"} aria-label="Toggle dark theme" onClick={handleThemeChange}>
+                <span />
+              </button>
+            </div>
           </div>
 
           {/* DATA & BACKUP */}
@@ -472,8 +536,10 @@ function App() {
           </div>
 
           <div className="settings-card">
-            <h3><ShieldCheck size={18} /> Account</h3>
-            <p className="settings-desc">Signed in as <strong>{user?.email}</strong>.</p>
+            <h3><ShieldCheck size={18} /> Account & privacy</h3>
+            <p className="settings-desc">Signed in as <strong>{user?.email}</strong>. Your workspace data is scoped to your account.</p>
+            <div className="account-detail-row"><span>Workspace</span><strong>Private to you</strong></div>
+            <div className="account-detail-row"><span>Vault security</span><strong>Encrypted at rest</strong></div>
             <button type="button" className="neo-button danger-outline full-width" onClick={async () => { await signOut(); }}>
               Sign out
             </button>
@@ -507,6 +573,9 @@ function App() {
       case "settings":
         content = <SettingsPage />;
         break;
+      case "assistant":
+        content = <AiAssistantPage profile={profile} onNavigate={navigate} />;
+        break;
       default:
         content = <Dashboard />;
         break;
@@ -530,11 +599,18 @@ function App() {
   if (loading) return <main className="auth-loading" aria-live="polite">Loading your organiser…</main>;
 
   return (
-    <div className="app-layout">
+    <div className="app-layout" onPointerMove={onPointerMove} onPointerDown={onPointerDown} onPointerLeave={onPointerLeave}>
+      <div className="ambient-backdrop" aria-hidden="true" ref={backdropRef}>
+        <span className="ambient-orb ambient-orb-indigo" />
+        <span className="ambient-orb ambient-orb-mint" />
+        <span className="ambient-orb ambient-orb-lilac" />
+        <span className="ambient-orb-interaction" />
+        <span className="ambient-touch-ripple" />
+      </div>
       {/* SIDEBAR NAVIGATION */}
       <aside className="sidebar">
         <div className="logo" onClick={() => navigate("dashboard")}>
-          <div className="logo-mark">LG</div>
+          <div className="logo-mark"><LifeGridMark /></div>
           <div>
             <strong>LifeGrid</strong>
             <span>Personal Organiser</span>
@@ -612,6 +688,16 @@ function App() {
             <span>Subscriptions</span>
           </motion.button>
 
+          <motion.button
+            type="button"
+            className={page === "assistant" ? "active" : ""}
+            onClick={() => navigate("assistant")}
+            whileTap={{ scale: 0.98 }}
+          >
+            <Sparkles size={18} />
+            <span>AI Assistant</span>
+          </motion.button>
+
         </nav>
 
         <div className="sidebar-bottom">
@@ -621,8 +707,8 @@ function App() {
             onClick={() => navigate("settings")}
             whileTap={{ scale: 0.98 }}
           >
-            <SettingsIcon size={18} />
-            <span>Settings</span>
+            <User size={18} />
+            <span>Profile</span>
           </motion.button>
         </div>
       </aside>
@@ -633,7 +719,7 @@ function App() {
           <div className="breadcrumb">
             <strong>LifeGrid</strong>
             <span>/</span>
-            {page.charAt(0).toUpperCase() + page.slice(1)}
+            {page === "settings" ? "Profile" : page === "assistant" ? "AI Assistant" : page.charAt(0).toUpperCase() + page.slice(1)}
           </div>
 
           <div className="topbar-right">
@@ -643,19 +729,6 @@ function App() {
               <span>{backendConnected ? "API Connected" : "API Offline"}</span>
             </div>
 
-            {/* AI ASSISTANT BUTTON */}
-            <motion.button
-              type="button"
-              className="topbar-ai-btn"
-              onClick={() => setIsAiModalOpen(true)}
-              title="Open LifeGrid AI Assistant"
-              whileHover={{ scale: 1.02 }}
-              whileTap={{ scale: 0.97 }}
-            >
-              <Sparkles size={16} />
-              <span>AI Assistant</span>
-            </motion.button>
-
             {/* USER PROFILE BADGE */}
             <motion.div
               className="profile"
@@ -663,10 +736,10 @@ function App() {
               whileHover={{ scale: 1.02 }}
               whileTap={{ scale: 0.98 }}
             >
-              <div className="profile-avatar">{profile.avatarLetter || "G"}</div>
+              <div className="profile-avatar">{profile.avatarLetter || "L"}</div>
               <div>
-                <strong>{profile.name || "Gokul"}</strong>
-                <span>{profile.role || "Student"}</span>
+                <strong>{profile.name || "LifeGrid user"}</strong>
+                <span>{profile.role || "Personal"}</span>
               </div>
             </motion.div>
           </div>
@@ -679,12 +752,6 @@ function App() {
         </section>
       </main>
 
-      {/* AI ASSISTANT MODAL */}
-      <AiAssistantModal
-        isOpen={isAiModalOpen}
-        onClose={() => setIsAiModalOpen(false)}
-        onNavigate={navigate}
-      />
     </div>
   );
 }

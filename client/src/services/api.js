@@ -35,6 +35,7 @@ export const api = {
   getStats: () => request("/stats"),
   getAiInsights: () => request("/ai/insights"),
   parseAiNaturalLanguage: (prompt) => request("/ai/parse", json("POST", { prompt })),
+  sendAiChat: (message, history = []) => request("/ai/chat", json("POST", { message, history })),
   ...crud("tasks"),
   ...crud("notes"),
   ...crud("bills"),

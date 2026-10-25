@@ -9,7 +9,11 @@ export function LifeGridProvider({ children }) {
   const { user } = useAuth();
   const [loading, setLoading] = useState(true);
   const [backendConnected, setBackendConnected] = useState(false);
-  const [profile, setProfile] = useState({ name: "LifeGrid user", role: "Personal", avatarLetter: "L" });
+  const [profile, setProfile] = useState({ name: "LifeGrid user", role: "Personal", bio: "", theme: "light", avatarLetter: "L" });
+
+  useEffect(() => {
+    document.documentElement.dataset.theme = user && profile.theme === "dark" ? "dark" : "light";
+  }, [profile.theme, user]);
 
   const [tasks, setTasks] = useState([]);
   const [notes, setNotes] = useState([]);

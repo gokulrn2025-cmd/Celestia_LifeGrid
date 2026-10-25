@@ -1,0 +1,20 @@
+services:
+  - type: web
+    name: lifegrid
+    runtime: node
+    plan: free
+    region: ohio
+    buildCommand: npm ci && npm --prefix client ci && npm --prefix server ci && npm run build
+    startCommand: npm start
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: NODE_VERSION
+        value: 24
+      - key: DATABASE_URL
+        sync: false
+      - key: VAULT_ENCRYPTION_KEY
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false

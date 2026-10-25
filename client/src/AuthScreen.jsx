@@ -1,6 +1,8 @@
 import { useState } from "react";
 import { Eye, EyeOff, ArrowRight, CheckCircle2, CircleAlert } from "lucide-react";
 import { useAuth } from "./context/AuthContext";
+import LifeGridMark from "./components/LifeGridMark";
+import { useAmbientInteraction } from "./hooks/useAmbientInteraction";
 import "./auth.css";
 
 export default function AuthScreen() {
@@ -13,6 +15,7 @@ export default function AuthScreen() {
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const isSignup = mode === "signup";
+  const { backdropRef, onPointerMove, onPointerDown, onPointerLeave } = useAmbientInteraction();
 
   async function handleSubmit(event) {
     event.preventDefault();
@@ -40,10 +43,17 @@ export default function AuthScreen() {
   }
 
   return (
-    <main className="auth-shell">
+    <main className="auth-shell" onPointerMove={onPointerMove} onPointerDown={onPointerDown} onPointerLeave={onPointerLeave}>
+      <div className="ambient-backdrop" aria-hidden="true" ref={backdropRef}>
+        <span className="ambient-orb ambient-orb-indigo" />
+        <span className="ambient-orb ambient-orb-mint" />
+        <span className="ambient-orb ambient-orb-lilac" />
+        <span className="ambient-orb-interaction" />
+        <span className="ambient-touch-ripple" />
+      </div>
       <section className="auth-art" aria-label="LifeGrid introduction">
         <a className="auth-brand" href="/" aria-label="LifeGrid home">
-          <span className="auth-brand-mark">L</span>
+          <LifeGridMark className="auth-brand-mark" />
           <span>LifeGrid</span>
         </a>
         <div className="auth-story">
@@ -71,7 +81,7 @@ export default function AuthScreen() {
 
       <section className="auth-panel">
         <div className="auth-form-wrap">
-          <p className="auth-mobile-brand">LifeGrid</p>
+          <p className="auth-mobile-brand"><LifeGridMark className="auth-brand-mark" />LifeGrid</p>
           <p className="auth-eyebrow">YOUR PERSONAL ORGANISER</p>
           <h2>{isSignup ? "Create your account" : "Welcome back"}</h2>
           <p className="auth-form-intro">{isSignup ? "Start with a fresh, private LifeGrid workspace." : "Sign in to pick up where you left off."}</p>

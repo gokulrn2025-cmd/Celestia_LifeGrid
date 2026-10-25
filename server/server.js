@@ -7,6 +7,9 @@ import { fileURLToPath } from "url";
 import { createHash, randomBytes, scrypt as scryptCallback, timingSafeEqual } from "crypto";
 import { promisify } from "util";
 import {
+  initDatabase,
+  checkDatabase,
+  closeDatabase,
   createUser,
   getUserByEmail,
   createSession,
@@ -42,6 +45,7 @@ import {
   sqlUpdateProfile,
 } from "./database.js";
 import { generateSmartInsights, parseNaturalLanguage } from "./aiService.js";
+import { chatWithGemini, parseCaptureWithGemini } from "./geminiService.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -69,14 +73,14 @@ app.use((req, res, next) => {
 });
 
 // Health & System Info
-app.get("/api/health", (req, res) => {
-  res.json({
-    status: "ok",
-    app: "LifeGrid API",
-    database: "connected",
-    version: "1.0.0",
-    timestamp: new Date().toISOString(),
-  });
+app.get("/api/health", async (req, res) => {
+  try {
+    await checkDatabase();
+    res.json({ status: "ok", app: "LifeGrid API", database: "connected", version: "1.0.0", timestamp: new Date().toISOString() });
+  } catch (err) {
+    console.error("Database health check failed:", err.message);
+    res.status(503).json({ status: "error", app: "LifeGrid API", database: "disconnected" });
+  }
 });
 
 function setSessionCookie(res, token, maxAgeSeconds = SESSION_MAX_AGE / 1000) {
@@ -121,14 +125,14 @@ app.post("/api/auth/signup", async (req, res) => {
   if (password.length < 12 || password.length > 128) return res.status(400).json({ error: "Use a password between 12 and 128 characters." });
 
   try {
-    const user = createUser(email, await hashPassword(password));
-    deleteExpiredSessions();
+    const user = await createUser(email, await hashPassword(password));
+    await deleteExpiredSessions();
     const token = randomBytes(32).toString("hex");
-    createSession(tokenHash(token), user.id, Date.now() + SESSION_MAX_AGE);
+    await createSession(tokenHash(token), user.id, Date.now() + SESSION_MAX_AGE);
     setSessionCookie(res, token);
     res.status(201).json({ user: publicUser(user) });
   } catch (err) {
-    if (String(err.code || "").includes("CONSTRAINT_UNIQUE")) return res.status(409).json({ error: "An account with this email already exists." });
+    if (err.code === "23505") return res.status(409).json({ error: "An account with this email already exists." });
     console.error("Signup failed:", err.message);
     res.status(500).json({ error: "Unable to create your account right now." });
   }
@@ -138,12 +142,12 @@ app.post("/api/auth/login", async (req, res) => {
   const email = typeof req.body?.email === "string" ? req.body.email.trim().toLowerCase() : "";
   const password = typeof req.body?.password === "string" ? req.body.password : "";
   try {
-    const user = getUserByEmail(email);
+    const user = await getUserByEmail(email);
     if (!user || !(await verifyPassword(password, user.password_hash))) {
       return res.status(401).json({ error: "Email or password is incorrect." });
     }
     const token = randomBytes(32).toString("hex");
-    createSession(tokenHash(token), user.id, Date.now() + SESSION_MAX_AGE);
+    await createSession(tokenHash(token), user.id, Date.now() + SESSION_MAX_AGE);
     setSessionCookie(res, token);
     res.json({ user: publicUser(user) });
   } catch (err) {
@@ -152,24 +156,31 @@ app.post("/api/auth/login", async (req, res) => {
   }
 });
 
-app.get("/api/auth/me", (req, res) => {
-  const token = sessionToken(req);
-  if (!token) return res.status(401).json({ error: "Sign in to continue." });
-  const session = getSession(tokenHash(token));
-  if (!session) return res.status(401).json({ error: "Your session has expired. Please sign in again." });
-  res.json({ user: publicUser(session) });
+app.get("/api/auth/me", async (req, res) => {
+  try {
+    const token = sessionToken(req);
+    if (!token) return res.status(401).json({ error: "Sign in to continue." });
+    const session = await getSession(tokenHash(token));
+    if (!session) return res.status(401).json({ error: "Your session has expired. Please sign in again." });
+    res.json({ user: publicUser(session) });
+  } catch (err) {
+    console.error("Session check failed:", err.message);
+    res.status(503).json({ error: "The database is temporarily unavailable." });
+  }
 });
 
-app.post("/api/auth/logout", (req, res) => {
+app.post("/api/auth/logout", async (req, res) => {
   const token = sessionToken(req);
-  if (token) deleteSession(tokenHash(token));
+  if (token) await deleteSession(tokenHash(token));
   setSessionCookie(res, "", 0);
   res.json({ success: true });
 });
 
-app.use("/api", (req, res, next) => {
+app.use("/api", async (req, res, next) => {
   const token = sessionToken(req);
-  const session = token ? getSession(tokenHash(token)) : null;
+  let session;
+  try { session = token ? await getSession(tokenHash(token)) : null; }
+  catch (err) { console.error("Session lookup failed:", err.message); return res.status(503).json({ error: "The database is temporarily unavailable." }); }
   if (!session) return res.status(401).json({ error: "Please sign in to access your LifeGrid data." });
   req.user = session;
   next();
@@ -178,9 +189,9 @@ app.use("/api", (req, res, next) => {
 // ==========================================
 // 1. STATS & SUMMARY (SQL AGGREGATES)
 // ==========================================
-app.get("/api/stats", (req, res) => {
+app.get("/api/stats", async (req, res) => {
   try {
-    const stats = sqlGetStats(req.user.id);
+    const stats = await sqlGetStats(req.user.id);
     res.json(stats);
   } catch (err) {
     console.error("SQL stats error:", err);
@@ -191,12 +202,12 @@ app.get("/api/stats", (req, res) => {
 // ==========================================
 // 2. AI INSIGHTS & NATURAL LANGUAGE CAPTURE
 // ==========================================
-app.get("/api/ai/insights", (req, res) => {
+app.get("/api/ai/insights", async (req, res) => {
   try {
     const dbSnapshot = {
-      bills: sqlGetBills(req.user.id),
-      tasks: sqlGetTasks(req.user.id),
-      subscriptions: sqlGetSubscriptions(req.user.id),
+      bills: await sqlGetBills(req.user.id),
+      tasks: await sqlGetTasks(req.user.id),
+      subscriptions: await sqlGetSubscriptions(req.user.id),
     };
     const insights = generateSmartInsights(dbSnapshot);
     res.json(insights);
@@ -206,57 +217,107 @@ app.get("/api/ai/insights", (req, res) => {
   }
 });
 
-app.post("/api/ai/parse", (req, res) => {
-  const { prompt } = req.body;
-  if (!prompt || typeof prompt !== "string") {
-    return res.status(400).json({ error: "A natural language prompt is required" });
+async function createAiItem(module, item, userId) {
+  if (module === "tasks") return await sqlCreateTask(item, userId);
+  if (module === "bills") return await sqlCreateBill(item, userId);
+  if (module === "subscriptions") return await sqlCreateSubscription(item, userId);
+  if (module === "notes") return await sqlCreateNote(item, userId);
+  return null;
+}
+
+function aiErrorResponse(res, err) {
+  console.error("AI request failed:", err.message);
+  const status = err.name === "TimeoutError" ? 504 : (err.status === 429 ? 429 : 502);
+  let message = "Gemini could not complete that request. Please try again.";
+  if (status === 429) message = "Gemini's current usage limit was reached. Check AI Studio usage or try again later.";
+  else if (status === 504) message = "Gemini took too long to respond. Please try again.";
+  else if (err.status === 400) message = `Gemini rejected the request${err.providerMessage ? `: ${err.providerMessage}` : ". Please try again."}`;
+  else if (err.status === 401 || err.status === 403) message = "Gemini rejected the API key. Check that it is valid and enabled for the Gemini API.";
+  else if (err.status === 404) message = "The configured Gemini model was not found. Check GEMINI_MODEL in the server settings.";
+  else if (err.status >= 500 && err.providerMessage) message = `Gemini is temporarily unavailable: ${err.providerMessage}`;
+  else if (!err.status) message = "LifeGrid could not reach Gemini. Check the server connection and try again.";
+  res.status(status).json({ error: message });
+}
+
+app.post("/api/ai/parse", async (req, res) => {
+  const prompt = typeof req.body?.prompt === "string" ? req.body.prompt.trim() : "";
+  if (!prompt || prompt.length > 1000) {
+    return res.status(400).json({ error: "Enter a prompt between 1 and 1,000 characters." });
   }
 
   try {
-    const parsed = parseNaturalLanguage(prompt);
-    let createdItem = null;
+    const usingGemini = Boolean(process.env.GEMINI_API_KEY);
+    const parsed = usingGemini
+      ? await parseCaptureWithGemini(prompt)
+      : parseNaturalLanguage(prompt);
 
-    if (parsed.module === "tasks") {
-      createdItem = sqlCreateTask(parsed.item, req.user.id);
-    } else if (parsed.module === "bills") {
-      createdItem = sqlCreateBill(parsed.item, req.user.id);
-    } else if (parsed.module === "subscriptions") {
-      createdItem = sqlCreateSubscription(parsed.item, req.user.id);
-    } else if (parsed.module === "notes") {
-      createdItem = sqlCreateNote(parsed.item, req.user.id);
+    if (!parsed.module || !parsed.item) {
+      return res.json({
+        success: true,
+        module: null,
+        item: null,
+        message: parsed.message,
+        provider: usingGemini ? "gemini" : "local",
+      });
     }
+
+    const createdItem = await createAiItem(parsed.module, parsed.item, req.user.id);
 
     res.status(201).json({
       success: true,
       module: parsed.module,
       item: createdItem,
       message: parsed.message,
+      provider: usingGemini ? "gemini" : "local",
     });
   } catch (err) {
-    console.error("AI parse SQL insert error:", err);
-    res.status(500).json({ error: "Failed to parse and store prompt" });
+    aiErrorResponse(res, err);
+  }
+});
+
+app.post("/api/ai/chat", async (req, res) => {
+  const message = typeof req.body?.message === "string" ? req.body.message.trim() : "";
+  if (!message || message.length > 2000) {
+    return res.status(400).json({ error: "Enter a message between 1 and 2,000 characters." });
+  }
+  if (!process.env.GEMINI_API_KEY) {
+    return res.status(503).json({ error: "Gemini is not configured. Add GEMINI_API_KEY to the server's private environment settings." });
+  }
+
+  try {
+    const result = await chatWithGemini(message, req.body?.history);
+    const created = result.capture
+      ? await createAiItem(result.capture.module, result.capture.item, req.user.id)
+      : null;
+    res.json({
+      reply: result.reply,
+      created: created ? { module: result.capture.module, item: created } : null,
+      provider: "gemini",
+    });
+  } catch (err) {
+    aiErrorResponse(res, err);
   }
 });
 
 // ==========================================
 // 3. TASKS CRUD (SQL)
 // ==========================================
-app.get("/api/tasks", (req, res) => {
+app.get("/api/tasks", async (req, res) => {
   try {
-    res.json(sqlGetTasks(req.user.id));
+    res.json(await sqlGetTasks(req.user.id));
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-app.post("/api/tasks", (req, res) => {
+app.post("/api/tasks", async (req, res) => {
   const { title, dueDate, priority, category } = req.body;
   if (!title || !title.trim()) {
     return res.status(400).json({ error: "Task title is required" });
   }
 
   try {
-    const item = sqlCreateTask({
+    const item = await sqlCreateTask({
       title: title.trim(),
       dueDate,
       priority,
@@ -268,10 +329,10 @@ app.post("/api/tasks", (req, res) => {
   }
 });
 
-app.put("/api/tasks/:id", (req, res) => {
+app.put("/api/tasks/:id", async (req, res) => {
   const id = Number(req.params.id);
   try {
-    const updated = sqlUpdateTask(id, req.body, req.user.id);
+    const updated = await sqlUpdateTask(id, req.body, req.user.id);
     if (!updated) return res.status(404).json({ error: "Task not found" });
     res.json(updated);
   } catch (err) {
@@ -279,10 +340,10 @@ app.put("/api/tasks/:id", (req, res) => {
   }
 });
 
-app.delete("/api/tasks/:id", (req, res) => {
+app.delete("/api/tasks/:id", async (req, res) => {
   const id = Number(req.params.id);
   try {
-    const success = sqlDeleteTask(id, req.user.id);
+    const success = await sqlDeleteTask(id, req.user.id);
     if (!success) return res.status(404).json({ error: "Task not found." });
     res.json({ success: true, id });
   } catch (err) {
@@ -293,32 +354,32 @@ app.delete("/api/tasks/:id", (req, res) => {
 // ==========================================
 // 4. NOTES CRUD (SQL)
 // ==========================================
-app.get("/api/notes", (req, res) => {
+app.get("/api/notes", async (req, res) => {
   try {
-    res.json(sqlGetNotes(req.user.id));
+    res.json(await sqlGetNotes(req.user.id));
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-app.post("/api/notes", (req, res) => {
+app.post("/api/notes", async (req, res) => {
   const { title, content, category } = req.body;
   if (!title || !title.trim()) {
     return res.status(400).json({ error: "Note title is required" });
   }
 
   try {
-    const item = sqlCreateNote({ title: title.trim(), content, category }, req.user.id);
+    const item = await sqlCreateNote({ title: title.trim(), content, category }, req.user.id);
     res.status(201).json(item);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-app.put("/api/notes/:id", (req, res) => {
+app.put("/api/notes/:id", async (req, res) => {
   const id = Number(req.params.id);
   try {
-    const updated = sqlUpdateNote(id, req.body, req.user.id);
+    const updated = await sqlUpdateNote(id, req.body, req.user.id);
     if (!updated) return res.status(404).json({ error: "Note not found" });
     res.json(updated);
   } catch (err) {
@@ -326,10 +387,10 @@ app.put("/api/notes/:id", (req, res) => {
   }
 });
 
-app.delete("/api/notes/:id", (req, res) => {
+app.delete("/api/notes/:id", async (req, res) => {
   const id = Number(req.params.id);
   try {
-    const success = sqlDeleteNote(id, req.user.id);
+    const success = await sqlDeleteNote(id, req.user.id);
     if (!success) return res.status(404).json({ error: "Note not found." });
     res.json({ success: true, id });
   } catch (err) {
@@ -340,15 +401,15 @@ app.delete("/api/notes/:id", (req, res) => {
 // ==========================================
 // 5. BILLS CRUD (SQL)
 // ==========================================
-app.get("/api/bills", (req, res) => {
+app.get("/api/bills", async (req, res) => {
   try {
-    res.json(sqlGetBills(req.user.id));
+    res.json(await sqlGetBills(req.user.id));
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-app.post("/api/bills", (req, res) => {
+app.post("/api/bills", async (req, res) => {
   const { name, amount, dueDate, category } = req.body;
   if (!name || !name.trim()) {
     return res.status(400).json({ error: "Bill name is required" });
@@ -358,17 +419,17 @@ app.post("/api/bills", (req, res) => {
   }
 
   try {
-    const item = sqlCreateBill({ name: name.trim(), amount: Number(amount), dueDate, category }, req.user.id);
+    const item = await sqlCreateBill({ name: name.trim(), amount: Number(amount), dueDate, category }, req.user.id);
     res.status(201).json(item);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-app.put("/api/bills/:id", (req, res) => {
+app.put("/api/bills/:id", async (req, res) => {
   const id = Number(req.params.id);
   try {
-    const updated = sqlUpdateBill(id, req.body, req.user.id);
+    const updated = await sqlUpdateBill(id, req.body, req.user.id);
     if (!updated) return res.status(404).json({ error: "Bill not found" });
     res.json(updated);
   } catch (err) {
@@ -376,10 +437,10 @@ app.put("/api/bills/:id", (req, res) => {
   }
 });
 
-app.delete("/api/bills/:id", (req, res) => {
+app.delete("/api/bills/:id", async (req, res) => {
   const id = Number(req.params.id);
   try {
-    const success = sqlDeleteBill(id, req.user.id);
+    const success = await sqlDeleteBill(id, req.user.id);
     if (!success) return res.status(404).json({ error: "Bill not found." });
     res.json({ success: true, id });
   } catch (err) {
@@ -390,15 +451,15 @@ app.delete("/api/bills/:id", (req, res) => {
 // ==========================================
 // 6. SUBSCRIPTIONS CRUD (SQL)
 // ==========================================
-app.get("/api/subscriptions", (req, res) => {
+app.get("/api/subscriptions", async (req, res) => {
   try {
-    res.json(sqlGetSubscriptions(req.user.id));
+    res.json(await sqlGetSubscriptions(req.user.id));
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-app.post("/api/subscriptions", (req, res) => {
+app.post("/api/subscriptions", async (req, res) => {
   const { name, amount, billingCycle, renewal, category } = req.body;
   if (!name || !name.trim()) {
     return res.status(400).json({ error: "Subscription name is required" });
@@ -408,7 +469,7 @@ app.post("/api/subscriptions", (req, res) => {
   }
 
   try {
-    const item = sqlCreateSubscription({
+    const item = await sqlCreateSubscription({
       name: name.trim(),
       amount: Number(amount),
       billingCycle,
@@ -421,10 +482,10 @@ app.post("/api/subscriptions", (req, res) => {
   }
 });
 
-app.put("/api/subscriptions/:id", (req, res) => {
+app.put("/api/subscriptions/:id", async (req, res) => {
   const id = Number(req.params.id);
   try {
-    const updated = sqlUpdateSubscription(id, req.body, req.user.id);
+    const updated = await sqlUpdateSubscription(id, req.body, req.user.id);
     if (!updated) return res.status(404).json({ error: "Subscription not found" });
     res.json(updated);
   } catch (err) {
@@ -432,10 +493,10 @@ app.put("/api/subscriptions/:id", (req, res) => {
   }
 });
 
-app.delete("/api/subscriptions/:id", (req, res) => {
+app.delete("/api/subscriptions/:id", async (req, res) => {
   const id = Number(req.params.id);
   try {
-    const success = sqlDeleteSubscription(id, req.user.id);
+    const success = await sqlDeleteSubscription(id, req.user.id);
     if (!success) return res.status(404).json({ error: "Subscription not found." });
     res.json({ success: true, id });
   } catch (err) {
@@ -446,15 +507,15 @@ app.delete("/api/subscriptions/:id", (req, res) => {
 // ==========================================
 // 7. DOCUMENTS CRUD (SQL)
 // ==========================================
-app.get("/api/documents", (req, res) => {
+app.get("/api/documents", async (req, res) => {
   try {
-    res.json(sqlGetDocuments(req.user.id));
+    res.json(await sqlGetDocuments(req.user.id));
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-app.post("/api/documents", (req, res) => {
+app.post("/api/documents", async (req, res) => {
   const { name, category, size, fileType, dataUrl, contentSnippet } = req.body;
   if (!name || !name.trim()) {
     return res.status(400).json({ error: "Document title or file is required" });
@@ -464,7 +525,7 @@ app.post("/api/documents", (req, res) => {
   }
 
   try {
-    const item = sqlCreateDocument({
+    const item = await sqlCreateDocument({
       name: name.trim(),
       category,
       size,
@@ -478,7 +539,7 @@ app.post("/api/documents", (req, res) => {
   }
 });
 
-app.put("/api/documents/:id", (req, res) => {
+app.put("/api/documents/:id", async (req, res) => {
   const id = Number(req.params.id);
   const { name, dataUrl } = req.body;
   if (name !== undefined && (typeof name !== "string" || !name.trim())) return res.status(400).json({ error: "Document name is required." });
@@ -486,7 +547,7 @@ app.put("/api/documents/:id", (req, res) => {
     return res.status(413).json({ error: "Document files must be 5 MB or smaller." });
   }
   try {
-    const updated = sqlUpdateDocument(id, req.body, req.user.id);
+    const updated = await sqlUpdateDocument(id, req.body, req.user.id);
     if (!updated) return res.status(404).json({ error: "Document not found." });
     res.json(updated);
   } catch {
@@ -494,10 +555,10 @@ app.put("/api/documents/:id", (req, res) => {
   }
 });
 
-app.delete("/api/documents/:id", (req, res) => {
+app.delete("/api/documents/:id", async (req, res) => {
   const id = Number(req.params.id);
   try {
-    const success = sqlDeleteDocument(id, req.user.id);
+    const success = await sqlDeleteDocument(id, req.user.id);
     if (!success) return res.status(404).json({ error: "Document not found." });
     res.json({ success: true, id });
   } catch (err) {
@@ -508,22 +569,22 @@ app.delete("/api/documents/:id", (req, res) => {
 // ==========================================
 // 8. PASSWORD VAULT CRUD (SQL)
 // ==========================================
-app.get("/api/vault", (req, res) => {
+app.get("/api/vault", async (req, res) => {
   try {
-    res.json(sqlGetVault(req.user.id));
+    res.json(await sqlGetVault(req.user.id));
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-app.post("/api/vault", (req, res) => {
+app.post("/api/vault", async (req, res) => {
   const { service, username, password, category } = req.body;
   if (!service || !service.trim() || !username || !username.trim() || !password || !password.trim()) {
     return res.status(400).json({ error: "Service, username/email, and password are all required" });
   }
 
   try {
-    const item = sqlCreateVault({
+    const item = await sqlCreateVault({
       service: service.trim(),
       username: username.trim(),
       password: password.trim(),
@@ -535,10 +596,10 @@ app.post("/api/vault", (req, res) => {
   }
 });
 
-app.put("/api/vault/:id", (req, res) => {
+app.put("/api/vault/:id", async (req, res) => {
   const id = Number(req.params.id);
   try {
-    const updated = sqlUpdateVault(id, req.body, req.user.id);
+    const updated = await sqlUpdateVault(id, req.body, req.user.id);
     if (!updated) return res.status(404).json({ error: "Credential not found" });
     res.json(updated);
   } catch (err) {
@@ -546,10 +607,10 @@ app.put("/api/vault/:id", (req, res) => {
   }
 });
 
-app.delete("/api/vault/:id", (req, res) => {
+app.delete("/api/vault/:id", async (req, res) => {
   const id = Number(req.params.id);
   try {
-    const success = sqlDeleteVault(id, req.user.id);
+    const success = await sqlDeleteVault(id, req.user.id);
     if (!success) return res.status(404).json({ error: "Credential not found." });
     res.json({ success: true, id });
   } catch (err) {
@@ -560,20 +621,35 @@ app.delete("/api/vault/:id", (req, res) => {
 // ==========================================
 // 9. SETTINGS & PROFILE (SQL)
 // ==========================================
-app.get("/api/settings", (req, res) => {
+app.get("/api/settings", async (req, res) => {
   try {
     res.json({
-      profile: sqlGetProfile(req.user.id),
+      profile: await sqlGetProfile(req.user.id),
     });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-app.post("/api/settings", (req, res) => {
+app.post("/api/settings", async (req, res) => {
   const { profile } = req.body;
+  if (profile !== undefined && (!profile || typeof profile !== "object" || Array.isArray(profile))) {
+    return res.status(400).json({ error: "Profile details must be an object." });
+  }
+  if (profile?.name !== undefined && (typeof profile.name !== "string" || !profile.name.trim() || profile.name.trim().length > 60)) {
+    return res.status(400).json({ error: "Name must be between 1 and 60 characters." });
+  }
+  if (profile?.role !== undefined && (typeof profile.role !== "string" || !profile.role.trim() || profile.role.trim().length > 60)) {
+    return res.status(400).json({ error: "Role must be between 1 and 60 characters." });
+  }
+  if (profile?.bio !== undefined && (typeof profile.bio !== "string" || profile.bio.length > 280)) {
+    return res.status(400).json({ error: "About text must be 280 characters or fewer." });
+  }
+  if (profile?.theme !== undefined && !["light", "dark"].includes(profile.theme)) {
+    return res.status(400).json({ error: "Choose either the light or dark theme." });
+  }
   try {
-    const updated = profile ? sqlUpdateProfile(profile, req.user.id) : sqlGetProfile(req.user.id);
+    const updated = profile ? await sqlUpdateProfile(profile, req.user.id) : await sqlGetProfile(req.user.id);
     res.json({ success: true, profile: updated });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -595,7 +671,12 @@ app.use((req, res) => {
   res.status(404).json({ error: `Route not found: ${req.method} ${req.path}` });
 });
 
-app.listen(PORT, () => {
-  console.log(`[LifeGrid] Database ready`);
+await initDatabase();
+const server = app.listen(PORT, () => {
+  console.log(`[LifeGrid] Database ready (Neon Postgres)`);
   console.log(`[LifeGrid] Running at http://localhost:${PORT}`);
 });
+
+for (const signal of ["SIGINT", "SIGTERM"]) {
+  process.once(signal, () => server.close(() => closeDatabase().finally(() => process.exit(0))));
+}

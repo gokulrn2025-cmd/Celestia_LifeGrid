@@ -32,8 +32,8 @@ export default function AiAssistantModal({ isOpen, onClose, onNavigate }) {
       const res = await quickCapture(text);
       setResult(res);
       setPrompt("");
-    } catch {
-      setError("Failed to parse prompt. Please try again.");
+    } catch (err) {
+      setError(err.message || "The AI request failed. Please try again.");
     } finally {
       setLoading(false);
     }
@@ -132,21 +132,23 @@ export default function AiAssistantModal({ isOpen, onClose, onNavigate }) {
                 >
                   <CheckCircle2 size={20} className="ai-check-icon" />
                   <div className="ai-success-details">
-                    <strong>Organised Successfully!</strong>
+                    <strong>{result.item ? "Organised Successfully!" : "A little more detail needed"}</strong>
                     <p>{result.message}</p>
-                    <motion.button
-                      className="ai-view-btn"
-                      onClick={() => {
-                        onClose();
-                        if (onNavigate && result.module) {
-                          onNavigate(result.module);
-                        }
-                      }}
-                      whileHover={{ scale: 1.02 }}
-                      whileTap={{ scale: 0.98 }}
-                    >
-                      View in {result.module?.toUpperCase()} &rarr;
-                    </motion.button>
+                    {result.item && (
+                      <motion.button
+                        className="ai-view-btn"
+                        onClick={() => {
+                          onClose();
+                          if (onNavigate && result.module) {
+                            onNavigate(result.module);
+                          }
+                        }}
+                        whileHover={{ scale: 1.02 }}
+                        whileTap={{ scale: 0.98 }}
+                      >
+                        View in {result.module?.toUpperCase()} &rarr;
+                      </motion.button>
+                    )}
                   </div>
                 </motion.div>
               )}
